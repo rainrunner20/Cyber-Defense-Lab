@@ -1,67 +1,52 @@
-from flask import Flask
-from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager
+"""Cyber Defense Lab: local defensive event simulation, not an attack toolkit."""
 import os
+from datetime import timedelta
 
-app = Flask(__name__)
-CORS(app)
+from flask import Flask, jsonify
+from flask_cors import CORS
 
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
-app.config["JWT_SECRET_KEY"] = "super-secret"
-db = SQLAlchemy(app)
-jwt = JWTManager(app)
+from extensions import db, jwt
 
-from models import User
-from routes import auth_routes
 
-app.register_blueprint(auth_routes)
+def create_app(config=None):
+    app = Flask(__name__)
+    app.config.update(
+        SQLALCHEMY_DATABASE_URI=os.getenv("DATABASE_URL", "sqlite:///cyberlab.db"),
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        JWT_ACCESS_TOKEN_EXPIRES=timedelta(hours=1),
+        MAX_CONTENT_LENGTH=16 * 1024,
+    )
+    if config:
+        app.config.update(config)
 
-@app.route('/')
-def index():
-    return {"message": "Cyber Defense Lab Backend Running"}
+    # Refuse the template's hardcoded signing key. Test code provides its own.
+    signing_key = app.config.get("JWT_SECRET_KEY") or os.getenv("JWT_SECRET_KEY")
+    if not signing_key or len(signing_key) < 32:
+        raise RuntimeError("Set JWT_SECRET_KEY to a random string of at least 32 characters.")
+    app.config["JWT_SECRET_KEY"] = signing_key
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
-```
+    CORS(app, resources={r"/*": {"origins": [
+        origin.strip() for origin in os.getenv(
+            "FRONTEND_ORIGINS", "http://localhost:5173"
+        ).split(",") if origin.strip()
+    ]}})
 
----
+    db.init_app(app)
+    jwt.init_app(app)
+    from models import User, SecurityEvent
+    from routes import api
+    app.register_blueprint(api)
 
-### 🧠 backend/models.py
-```python
-from app import db
+    @app.get("/")
+    @app.get("/health")
+    def health():
+        return jsonify(status="ok", environment="educational-demo")
 
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(128), nullable=False)
-    role = db.Column(db.String(10), nullable=False)  # red or blue
-```
+    with app.app_context():
+        # Simple local demo initialization, not a replacement for migrations.
+        db.create_all()
+    return app
 
----
 
-### 🧠 backend/routes.py
-```python
-from flask import Blueprint, request, jsonify
-from app import db
-from models import User
-from flask_jwt_extended import create_access_token
-
-auth_routes = Blueprint("auth", __name__)
-
-@auth_routes.route("/register", methods=["POST"])
-def register():
-    data = request.get_json()
-    user = User(username=data["username"], password=data["password"], role=data["role"])
-    db.session.add(user)
-    db.session.commit()
-    return jsonify(msg="User registered"), 201
-
-@auth_routes.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    user = User.query.filter_by(username=data["username"]).first()
-    if user and user.password == data["password"]:
-        token = create_access_token(identity={"username": user.username, "role": user.role})
-        return jsonify(access_token=token)
-    return jsonify(msg="Bad credentials"), 401
+if __name__ == "__main__":
+    create_app().run(host="127.0.0.1", port=5000, debug=False)
